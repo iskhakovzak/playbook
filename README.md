@@ -1,139 +1,119 @@
-# Earnings Season Tracker & Confidence Scorer
+# Earnings Season Tracker & Confidence Scorer v2
 
-A TradingView Pine Script v6 indicator that automatically tracks trading statistics for earnings-season setups, computes real-time confidence scores, and provides a comprehensive on-chart dashboard with alerting capabilities.
-
-## Overview
-
-This system implements a methodology for systematically tracking and scoring earnings-season trading setups, inspired by statistical approaches to gap trading on earnings reports. It answers three core questions:
-- **What to trade?** (which setups have the highest probability)
-- **How to trade?** (which parameter combinations improve odds)
-- **When to trade?** (recent trend vs. season-long statistics)
+Pine Script v6 indicator for TradingView that automates tracking of post-earnings trading setups, confidence scoring, and risk management.
 
 ## Features
 
-### Setup Detection (8 Types)
-| Setup | Description |
-|-------|-------------|
-| **Gap Up Long** | Gap up on earnings, trade continuation (long) |
-| **Gap Up Short** | Gap up on earnings, trade reversal (short) |
-| **Gap Down Long** | Gap down on earnings, trade reversal (long) |
-| **Gap Down Short** | Gap down on earnings, trade continuation (short) |
-| **Green Turret** | First candle after earnings open is green (reversal short) |
-| **Pre-Market Move** | Significant pre-market volume activity |
-| **Second Movement** | Post-open continuation after initial move and pullback |
-| **Daily Breakout** | Price breaks previous day's high/low range |
+### 8 Setup Types Tracked
+- **Gap Up Long/Short** — continuation/reversal after upward earnings gap
+- **Gap Down Long/Short** — continuation/reversal after downward earnings gap
+- **Green Turret** — first candle green after gap up (short setup)
+- **Pre-Market Move** — high pre-market volume signals
+- **Second Movement** — continuation beyond initial 30-min range
+- **Daily Breakout** — price breaks prior day's high/low
 
-### Filtering Parameters
-- **Market Capitalization** (above/below threshold, e.g., 100B)
-- **Pre-Market Volume** (minimum threshold)
-- **Sector** (Technology, Healthcare, Financial, etc.)
-- **Gap Size** (minimum % for classification)
-- **Price Position** (at 52-week highs, middle, or lows)
-- **Daily Breakout** (confirmed breakout of previous range)
+### EPS Surprise Analysis
+- Calculates `(actual - estimate) / |estimate|` surprise percentage
+- Tracks consecutive beat/miss streaks
+- Displays EPS data on chart labels and dashboard
+- EPS surprise boosts confidence scoring
 
-### Confidence Scoring (0-100)
-- Base probability from historical binary outcomes
-- Parameter-weighted multipliers (market cap, volume, sector, breakout, recency)
-- Rolling window statistics (full season + configurable recent window)
-- Four confidence levels: HIGH (>=70), MEDIUM (50-69), LOW (30-49), AVOID (<30)
+### Gap Analysis
+- **Gap fill detection** — tracks if gaps fill within configurable N bars
+- **Expected move** — calculates average ± stdev of historical earnings gaps
+- **Large gap classification** — separate tracking for gaps above threshold
 
-### Dashboard
-- Real-time on-chart table showing all setup statistics
-- Per-setup: total count, wins, probability %, recent probability, filtered probability, confidence score
-- Active signal display with confidence level
-- Backtest summary (win rate, profit factor, P&L in R-multiples, max drawdown)
-- Current stock metadata (ticker, sector, market cap, gap %, price position)
+### Confidence Scoring (0–100)
+Multi-factor composite score using parameter-weighted multipliers:
+- Market cap match
+- Volume threshold
+- Sector alignment
+- Daily breakout presence
+- Recency boost (recent > season probability)
+- **EPS surprise boost** (new)
+- **Large gap bonus** (new)
+- **Gap fill rate penalty** (new)
 
-### Alerting
-- High confidence setup detection (score >= 70)
-- New earnings report detection
-- Significant probability shift (>10% change)
+### Enhanced Backtesting
+- Win rate, profit factor, cumulative P&L
+- **Expectancy** (avg P&L per trade)
+- **Kelly criterion** (optimal bet fraction)
+- **Max consecutive wins/losses**
+- **3 position sizing modes**: Fixed, Confidence-Based, Kelly
 
-### Backtesting
-- Hypothetical P&L tracking with configurable risk:reward ratio
-- Win rate and profit factor calculation
-- Maximum drawdown tracking
+### Dashboard Table (10 columns × 16 rows)
+- Per-setup statistics: total, wins, probability, recent probability, **trend arrows**, filtered probability, confidence score, **avg EPS surprise**, filtered total
+- **Rich tooltips** on all column headers explaining each metric
+- Active signal display with confidence color-coding
+- Filter status showing all active criteria
+- **Enhanced stats row**: expectancy, Kelly %, max streaks, suggested risk %
+- **Market context row**: price position, weekly trend, EPS streak, expected move, gap fill rate, relative volume, historical volatility
+- **EPS & Gap info row**: current earnings data with beat/miss highlighting
+
+### Filters
+- Market cap (above/below threshold)
+- Sector
+- Pre-market volume
+- **Gap size** (small / large relative to threshold) — new
+- **Price position** (at 52w highs / middle / at 52w lows) — new
+
+### Alerts
+- High confidence setup detected (≥70)
+- Earnings bar detected
+- Probability shift (>10%)
+- **EPS beat detected** — new
+
+### Visual Enhancements
+- **Compact label mode** — short setup names for cleaner charts
+- **Trend arrows** (▲/▼/─) showing probability direction
+- **Gap fill markers** — X-cross plotted when gap fills
+- **Continuation/Reversal labels** on earnings bars
+- **Large gap indicator** (⚡) on chart labels
+- EPS surprise columns in score pane
+
+## Requirements
+
+- TradingView **Pro+** subscription (for `request.earnings()` and `request.financial()`)
+- Daily timeframe recommended
 
 ## Installation
 
-1. Open TradingView and navigate to the Pine Editor
-2. Create a new indicator script
-3. Copy the contents of `src/earnings_tracker.pine` into the editor
-4. Click "Add to Chart"
-5. Configure inputs via the indicator settings panel
-
-## Configuration
-
-### Key Settings
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| Lookback Bars | 500 | Historical bars for statistics |
-| Season Length | 45 days | Earnings season window |
-| Recent Window | 14 days | Short-term trend window |
-| Min Samples | 3 | Minimum setups before showing probability |
-| Min Gap % | 2.0% | Threshold to classify as a gap |
-| MCap Threshold | 100B | Market cap filter threshold |
-| Min PM Volume | 100K | Pre-market volume minimum |
-| Risk:Reward | 2.0 | Backtesting R:R ratio |
-
-### Scoring Multipliers
-
-Each parameter can boost the confidence score when conditions are met:
-- Market Cap Multiplier: 1.2x (default)
-- Volume Multiplier: 1.15x (default)
-- Sector Multiplier: 1.1x (default)
-- Breakout Multiplier: 1.1x (default)
-- Recency Multiplier: 1.2x (default)
-
-## Usage Guide
-
-### Daily Workflow
-1. Apply indicator to stocks with upcoming/recent earnings
-2. Check the dashboard table for setup probabilities
-3. Apply filters (market cap, sector, volume) to refine probabilities
-4. Monitor confidence score for the active setup
-5. Set alerts for high-confidence signals
-
-### Interpreting the Dashboard
-- **Prob%**: Overall probability for the full season
-- **14D Prob%**: Probability in the last 14 days (detect trend shifts)
-- **Filt Prob%**: Probability with all active filters applied
-- **Score**: Composite confidence score (0-100) with level indicator (H/M/L/X)
-
-### Best Practices
-- Compare full-season vs. recent probabilities to detect changing dynamics
-- Use market cap + sector filters to find the best parameter combinations
-- Monitor the backtest row to validate that high-confidence setups are profitable
-- Adjust the recent window (14D default) based on how quickly setups change
-
-## Technical Requirements
-
-- TradingView Pro/Pro+/Premium account (for `request.earnings()` and `request.financial()`)
-- Pine Script v6 runtime
-- Recommended timeframe: Daily (1D) for most accurate gap and earnings detection
+1. Open TradingView → Pine Editor
+2. Create new indicator
+3. Paste contents of `src/earnings_tracker.pine`
+4. Click "Add to chart"
+5. Configure inputs in Settings panel
 
 ## File Structure
 
 ```
-earnings-tracker/
-  src/
-    earnings_tracker.pine    # Main indicator script
-  docs/
-    architecture.md          # System architecture document
-    metrics_report.md        # Metrics and validation report
-  README.md                  # This file
+src/
+  earnings_tracker.pine   — Main indicator (960 lines, Pine Script v6)
 ```
 
-## Limitations
+## Changelog
 
-- Pine Script cannot access external APIs (no Finviz integration)
-- Limited to 40 dynamic `request.*()` calls per execution
-- Historical data depends on TradingView's available bar history
-- Pre-market volume detection approximates using first-bar volume
-- Market cap calculated from shares outstanding (quarterly data) x current price
-- No true machine learning; uses weighted parameter scoring instead
+### v2 (Current)
+- Added EPS surprise analysis with beat/miss streak tracking
+- Added gap fill detection and tracking
+- Added expected move calculation from historical gaps
+- Enhanced confidence scoring with EPS, gap fill, and large gap factors
+- Added Kelly criterion and confidence-based position sizing
+- Added expectancy, max consecutive wins/losses to backtest engine
+- Added gap size and price position filters
+- Added trend arrows showing probability direction
+- Added rich tooltips to all dashboard columns
+- Added market context row (weekly trend, relative volume, historical volatility)
+- Added EPS & gap detail row with beat/miss highlighting
+- Added compact label mode
+- Added gap fill markers on chart
+- Added EPS beat alert condition
+- Cleaned up unused variables and reduced validator warnings
+- Refactored setup recording with helper function (DRY)
+- Code grew from 803 → 960 lines with significantly more functionality
 
-## License
-
-This Pine Script code is subject to the terms of the Mozilla Public License 2.0.
+### v1
+- Initial implementation with 8 setup types
+- Basic confidence scoring with 5 multipliers
+- Dashboard table with probabilities and backtest summary
+- 3 alert conditions
