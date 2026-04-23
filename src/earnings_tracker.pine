@@ -2,7 +2,7 @@
 // © EarningsTracker
 
 //@version=6
-indicator("Earnings Season Tracker & Confidence Scorer", overlay = true, max_labels_count = 500, max_bars_back = 5000)
+indicator("Earnings Season Tracker & Confidence Scorer v2", overlay = true, max_labels_count = 500, max_bars_back = 5000)
 
 // ============================================================================
 // SECTION 1: USER INPUTS
@@ -19,6 +19,7 @@ i_min_samples       = input.int(3, "Min Samples for Probability", minval = 1, ma
 grp_gap = "Gap Detection"
 i_gap_min_pct       = input.float(2.0, "Minimum Gap % to Classify", minval = 0.5, maxval = 20.0, step = 0.5, group = grp_gap)
 i_gap_large_pct     = input.float(5.0, "Large Gap Threshold %", minval = 2.0, maxval = 30.0, step = 0.5, group = grp_gap)
+i_gap_fill_bars     = input.int(5, "Gap Fill Check Window (bars)", minval = 1, maxval = 20, group = grp_gap, tooltip = "Number of bars after gap to check if gap fills")
 
 // --- Filtering ---
 grp_filter = "Filters"
@@ -26,6 +27,8 @@ i_mcap_threshold    = input.float(100.0, "Market Cap Threshold (Billions)", minv
 i_mcap_filter_mode  = input.string("All", "Market Cap Filter", options = ["All", "Above Threshold", "Below Threshold"], group = grp_filter)
 i_vol_min           = input.float(100000, "Min Pre-Market Volume", minval = 0, maxval = 10000000, step = 10000, group = grp_filter)
 i_sector_filter     = input.string("All", "Sector Filter", options = ["All", "Technology", "Healthcare", "Financial", "Consumer Cyclical", "Consumer Defensive", "Energy", "Industrials", "Basic Materials", "Communication Services", "Real Estate", "Utilities"], group = grp_filter)
+i_gap_size_filter   = input.string("All", "Gap Size Filter", options = ["All", "Small (< Large Threshold)", "Large (>= Large Threshold)"], group = grp_filter, tooltip = "Filter setups by gap size relative to Large Gap Threshold")
+i_price_pos_filter  = input.string("All", "Price Position Filter", options = ["All", "At Highs", "Middle", "At Lows"], group = grp_filter, tooltip = "Filter by 52-week price position")
 
 // --- Scoring ---
 grp_score = "Confidence Scoring"
@@ -34,6 +37,8 @@ i_vol_weight        = input.float(1.15, "Volume Multiplier", minval = 0.5, maxva
 i_sector_weight     = input.float(1.1, "Sector Multiplier", minval = 0.5, maxval = 2.0, step = 0.05, group = grp_score)
 i_breakout_weight   = input.float(1.1, "Breakout Multiplier", minval = 0.5, maxval = 2.0, step = 0.05, group = grp_score)
 i_recency_weight    = input.float(1.2, "Recency Multiplier", minval = 0.5, maxval = 2.0, step = 0.05, group = grp_score)
+i_eps_weight        = input.float(1.15, "EPS Surprise Multiplier", minval = 0.5, maxval = 2.0, step = 0.05, group = grp_score, tooltip = "Boost when EPS beats estimate")
+i_gap_fill_weight   = input.float(0.9, "Gap Fill Penalty", minval = 0.5, maxval = 1.5, step = 0.05, group = grp_score, tooltip = "Applied when gap historically fills (lower = more penalty)")
 
 // --- Visual ---
 grp_visual = "Visualization"
@@ -41,6 +46,8 @@ i_show_table        = input.bool(true, "Show Dashboard Table", group = grp_visua
 i_show_labels       = input.bool(true, "Show Setup Labels on Chart", group = grp_visual)
 i_show_bg           = input.bool(true, "Show Confidence Background", group = grp_visual)
 i_show_score_plot   = input.bool(true, "Plot Confidence Score", group = grp_visual)
+i_show_eps          = input.bool(true, "Show EPS Info on Labels", group = grp_visual, tooltip = "Display EPS surprise on chart labels")
+i_compact_labels    = input.bool(false, "Compact Label Mode", group = grp_visual, tooltip = "Use short setup names on labels")
 i_table_position    = input.string("Top Right", "Table Position", options = ["Top Right", "Top Left", "Bottom Right", "Bottom Left", "Top Center", "Bottom Center"], group = grp_visual)
 i_table_size        = input.string("Small", "Table Text Size", options = ["Tiny", "Small", "Normal"], group = grp_visual)
 i_show_debug        = input.bool(false, "Show Debug Info", group = grp_visual)
@@ -50,18 +57,19 @@ grp_alert = "Alerts"
 i_alert_high        = input.bool(true, "Alert on High Confidence (>=70)", group = grp_alert)
 i_alert_earnings    = input.bool(true, "Alert on New Earnings Detection", group = grp_alert)
 i_alert_shift       = input.bool(true, "Alert on Probability Shift (>10%)", group = grp_alert)
+i_alert_eps_beat    = input.bool(false, "Alert on EPS Beat", group = grp_alert, tooltip = "Alert when earnings beat estimate")
 
 // --- Backtesting ---
 grp_backtest = "Backtesting"
 i_risk_reward       = input.float(2.0, "Risk:Reward Ratio", minval = 0.5, maxval = 10.0, step = 0.5, group = grp_backtest)
 i_base_risk_pct     = input.float(1.0, "Base Risk % of Account", minval = 0.1, maxval = 5.0, step = 0.1, group = grp_backtest)
+i_position_mode     = input.string("Fixed", "Position Sizing Mode", options = ["Fixed", "Confidence-Based", "Kelly"], group = grp_backtest, tooltip = "Fixed: base risk always. Confidence-Based: scale by confidence. Kelly: optimal fraction.")
 
 
 // ============================================================================
 // SECTION 2: CONSTANTS & ENUMS
 // ============================================================================
 
-// Setup type constants
 int SETUP_GAP_UP_LONG    = 0
 int SETUP_GAP_UP_SHORT   = 1
 int SETUP_GAP_DOWN_LONG  = 2
@@ -72,17 +80,14 @@ int SETUP_SECOND_MOVE    = 6
 int SETUP_DAILY_BREAKOUT = 7
 int SETUP_COUNT          = 8
 
-// Confidence levels
 float CONF_HIGH   = 70.0
 float CONF_MEDIUM = 50.0
 float CONF_LOW    = 30.0
 
-// Price position constants
 int POS_AT_HIGHS = 2
 int POS_MIDDLE   = 1
 int POS_AT_LOWS  = 0
 
-// Setup names for display
 setup_name(int id) =>
     switch id
         0 => "Gap Up Long"
@@ -116,13 +121,21 @@ setup_short_name(int id) =>
 earnings_actual   = request.earnings(syminfo.tickerid, earnings.actual)
 earnings_estimate = request.earnings(syminfo.tickerid, earnings.estimate)
 
+// --- EPS Surprise Calculation ---
+float eps_surprise_pct = na
+bool eps_is_beat = false
+bool eps_is_miss = false
+if not na(earnings_actual) and not na(earnings_estimate) and math.abs(earnings_estimate) > 0.001
+    eps_surprise_pct := ((earnings_actual - earnings_estimate) / math.abs(earnings_estimate)) * 100.0
+    eps_is_beat := earnings_actual > earnings_estimate
+    eps_is_miss := earnings_actual < earnings_estimate
+
 // --- Fundamental Data ---
 shares_outstanding = request.financial(syminfo.tickerid, "TOTAL_SHARES_OUTSTANDING", "FQ")
 market_cap_raw     = close * nz(shares_outstanding, 0)
 market_cap_billions = market_cap_raw / 1e9
 
 // --- Multi-Timeframe Data ---
-// Daily data for gap calculations
 [d_open, d_high, d_low, d_close, d_volume] = request.security(syminfo.tickerid, "D", [open, high, low, close, volume])
 d_prev_close = request.security(syminfo.tickerid, "D", close[1])
 d_prev_high  = request.security(syminfo.tickerid, "D", high[1])
@@ -136,8 +149,16 @@ w_low  = request.security(syminfo.tickerid, "W", low)
 yearly_high = ta.highest(d_high, 252)
 yearly_low  = ta.lowest(d_low, 252)
 
-// Current sector
+// Weekly trend classification
+weekly_range = w_high - w_low
+weekly_position = weekly_range > 0 ? (close - w_low) / weekly_range : 0.5
+bool weekly_bullish = weekly_position > 0.6
+bool weekly_bearish = weekly_position < 0.4
+
 current_sector = syminfo.sector
+
+// --- Historical Volatility ---
+float hist_volatility = ta.stdev(math.log(close / close[1]), 20) * math.sqrt(252) * 100
 
 
 // ============================================================================
@@ -145,12 +166,30 @@ current_sector = syminfo.sector
 // ============================================================================
 
 // --- 4.1 Earnings Detection ---
-// Detect earnings bars by checking for new earnings data
 var float prev_earnings = na
 earnings_changed = not na(earnings_actual) and (na(prev_earnings) or earnings_actual != prev_earnings)
 is_earnings_bar = earnings_changed
 if not na(earnings_actual)
     prev_earnings := earnings_actual
+
+// --- EPS Streak Tracking ---
+var int eps_beat_streak = 0
+var int eps_miss_streak = 0
+if is_earnings_bar
+    if eps_is_beat
+        eps_beat_streak += 1
+        eps_miss_streak := 0
+    else if eps_is_miss
+        eps_miss_streak += 1
+        eps_beat_streak := 0
+    else
+        eps_beat_streak := 0
+        eps_miss_streak := 0
+
+// --- Earnings History for Expected Move ---
+var array<float> arr_hist_gaps = array.new<float>(0)
+var float avg_earnings_gap = na
+var float stdev_earnings_gap = na
 
 // --- 4.2 Gap Detection ---
 gap_pct = nz(d_prev_close) > 0 ? ((d_open - nz(d_prev_close)) / nz(d_prev_close)) * 100 : 0.0
@@ -159,8 +198,42 @@ is_gap_down = gap_pct <= -i_gap_min_pct
 is_large_gap = math.abs(gap_pct) >= i_gap_large_pct
 gap_direction = is_gap_up ? 1 : is_gap_down ? -1 : 0
 
-// --- 4.3 Green Turret Detection ---
-// First candle after open is green (close > open)
+// Record gap for expected move calculation
+if is_earnings_bar and (is_gap_up or is_gap_down)
+    array.push(arr_hist_gaps, math.abs(gap_pct))
+    if array.size(arr_hist_gaps) > 1
+        avg_earnings_gap := array.avg(arr_hist_gaps)
+        stdev_earnings_gap := array.stdev(arr_hist_gaps)
+
+// --- 4.3 Gap Fill Detection ---
+var int gap_fill_bar_start = 0
+var float gap_fill_target = na
+var bool gap_fill_pending = false
+var int gap_fills_count = 0
+var int gap_total_count = 0
+var int gap_fill_direction = 0
+bool gap_filled_current = false
+
+if is_earnings_bar and (is_gap_up or is_gap_down)
+    gap_fill_bar_start := bar_index
+    gap_fill_target := nz(d_prev_close)
+    gap_fill_direction := gap_direction
+    gap_fill_pending := true
+    gap_total_count += 1
+
+if gap_fill_pending and bar_index > gap_fill_bar_start and bar_index <= gap_fill_bar_start + i_gap_fill_bars
+    if not na(gap_fill_target)
+        if (gap_fill_direction > 0 and low <= gap_fill_target) or (gap_fill_direction < 0 and high >= gap_fill_target)
+            gap_fills_count += 1
+            gap_fill_pending := false
+            gap_filled_current := true
+
+if gap_fill_pending and bar_index > gap_fill_bar_start + i_gap_fill_bars
+    gap_fill_pending := false
+
+float gap_fill_rate = gap_total_count > 0 ? (float(gap_fills_count) / float(gap_total_count)) * 100.0 : na
+
+// --- 4.4 Green Turret Detection ---
 is_first_bar_of_day = ta.change(time("D")) != 0
 var bool first_candle_green = false
 var bool green_turret_today = false
@@ -172,28 +245,25 @@ if is_first_bar_of_day
 if is_first_bar_of_day and close > open
     first_candle_green := true
 
-// Green turret: earnings gap + first candle green + upward spike
 green_turret_today := first_candle_green and is_gap_up
 
-// --- 4.4 Pre-Market Volume Detection ---
-// Approximate pre-market activity using volume in the first minutes
+// --- 4.5 Pre-Market Volume Detection ---
 var float premarket_volume = 0.0
 if is_first_bar_of_day
     premarket_volume := volume
 has_premarket_volume = premarket_volume >= i_vol_min
 
-// --- 4.5 Daily Breakout Detection ---
+// --- 4.6 Daily Breakout Detection ---
 is_daily_breakout_up   = d_high > nz(d_prev_high) and nz(d_prev_high) > 0
 is_daily_breakout_down = d_low < nz(d_prev_low) and nz(d_prev_low) > 0
 is_daily_breakout = is_daily_breakout_up or is_daily_breakout_down
 
-// --- 4.6 Price Position Classification ---
+// --- 4.7 Price Position Classification ---
 range_52w = yearly_high - yearly_low
 price_position_raw = range_52w > 0 ? (close - yearly_low) / range_52w : 0.5
 price_position = price_position_raw > 0.75 ? POS_AT_HIGHS : price_position_raw < 0.25 ? POS_AT_LOWS : POS_MIDDLE
 
-// --- 4.7 Second Movement Detection ---
-// After initial post-open move, does price make a continuation?
+// --- 4.8 Second Movement Detection ---
 var float open_of_day = na
 var float first_move_high = na
 var float first_move_low = na
@@ -207,18 +277,20 @@ if is_first_bar_of_day
 else
     bars_since_open += 1
 
-if bars_since_open <= 6 and bars_since_open > 0  // First 30 min (on 5-min chart)
+if bars_since_open <= 6 and bars_since_open > 0
     first_move_high := math.max(nz(first_move_high), high)
     first_move_low  := math.min(nz(first_move_low, low), low)
 
-// Second movement: price exceeds first 30-min range after pullback
 is_second_move_long  = bars_since_open > 6 and high > nz(first_move_high) and close > open
 is_second_move_short = bars_since_open > 6 and low < nz(first_move_low) and close < open
 
-// --- 4.8 Post-Open Continuation/Reversal ---
-// After gap up: continuation = price goes higher; reversal = price drops below open
+// --- 4.9 Post-Open Continuation/Reversal ---
 post_open_continuation = (is_gap_up and close > d_open) or (is_gap_down and close < d_open)
 post_open_reversal     = (is_gap_up and close < d_open) or (is_gap_down and close > d_open)
+
+// --- 4.10 Relative Volume ---
+float avg_volume_20 = ta.sma(d_volume, 20)
+float relative_volume = avg_volume_20 > 0 ? d_volume / avg_volume_20 : 1.0
 
 
 // ============================================================================
@@ -227,7 +299,7 @@ post_open_reversal     = (is_gap_up and close < d_open) or (is_gap_down and clos
 
 // --- Storage Arrays ---
 var array<int>   arr_setup_type    = array.new<int>(0)
-var array<int>   arr_outcome       = array.new<int>(0)    // 0 or 1
+var array<int>   arr_outcome       = array.new<int>(0)
 var array<float> arr_gap_pct       = array.new<float>(0)
 var array<float> arr_mcap          = array.new<float>(0)
 var array<float> arr_volume        = array.new<float>(0)
@@ -235,126 +307,81 @@ var array<int>   arr_timestamp     = array.new<int>(0)
 var array<int>   arr_price_pos     = array.new<int>(0)
 var array<bool>  arr_has_breakout  = array.new<bool>(0)
 var array<string> arr_sector       = array.new<string>(0)
+var array<float> arr_eps_surprise  = array.new<float>(0)
+var array<bool>  arr_is_large_gap  = array.new<bool>(0)
 
 // --- Outcome determination ---
-// Use end-of-day close vs open to determine if setup "worked"
-// For gap-up long: worked if close > open (continuation)
-// For gap-up short: worked if close < open (reversal)
-// For gap-down short: worked if close < open (continuation)
-// For gap-down long: worked if close > open (reversal)
 var int last_earnings_bar = 0
 var int last_gap_dir = 0
 var bool pending_outcome = false
-var int pending_setup = -1
+var float pending_eps_surprise = na
+var float pending_gap_pct = na
+var bool pending_is_large_gap = false
+var bool pending_green_turret = false
+var bool pending_daily_breakout = false
+var bool pending_has_pm_vol = false
+var float pending_pm_vol = 0.0
+var float pending_mcap = 0.0
+var int pending_price_pos = 0
+var string pending_sector = ""
+var bool pending_second_move_long = false
+var bool pending_second_move_short = false
 
-// Track setup on earnings day
+// Helper to record a single setup entry
+record_setup(int setup_type, int outcome, float g_pct, float mcap, float vol, int pp, bool brk, string sec, float eps_surp, bool large_gap) =>
+    array.push(arr_setup_type, setup_type)
+    array.push(arr_outcome, outcome)
+    array.push(arr_gap_pct, g_pct)
+    array.push(arr_mcap, mcap)
+    array.push(arr_volume, vol)
+    array.push(arr_timestamp, int(time))
+    array.push(arr_price_pos, pp)
+    array.push(arr_has_breakout, brk)
+    array.push(arr_sector, sec)
+    array.push(arr_eps_surprise, nz(eps_surp))
+    array.push(arr_is_large_gap, large_gap)
+
 if is_earnings_bar and timeframe.isdaily
     pending_outcome := true
     last_gap_dir := gap_direction
     last_earnings_bar := bar_index
+    pending_eps_surprise := eps_surprise_pct
+    pending_gap_pct := gap_pct
+    pending_is_large_gap := is_large_gap
+    pending_green_turret := green_turret_today
+    pending_daily_breakout := is_daily_breakout
+    pending_has_pm_vol := has_premarket_volume
+    pending_pm_vol := premarket_volume
+    pending_mcap := market_cap_billions
+    pending_price_pos := price_position
+    pending_sector := current_sector
+    pending_second_move_long := is_second_move_long
+    pending_second_move_short := is_second_move_short
 
-// Record outcomes at end of earnings day (simplified: use daily close)
 if pending_outcome and timeframe.isdaily and bar_index > last_earnings_bar
 
-    // Determine outcome based on close vs open
     float eod_result = d_close - d_open
     bool continuation = eod_result > 0 and last_gap_dir > 0 or eod_result < 0 and last_gap_dir < 0
 
-    // Gap Up setups
     if last_gap_dir > 0
-        // Gap Up Long (continuation)
-        array.push(arr_setup_type, SETUP_GAP_UP_LONG)
-        array.push(arr_outcome, continuation ? 1 : 0)
-        array.push(arr_gap_pct, gap_pct)
-        array.push(arr_mcap, market_cap_billions)
-        array.push(arr_volume, premarket_volume)
-        array.push(arr_timestamp, int(time))
-        array.push(arr_price_pos, price_position)
-        array.push(arr_has_breakout, is_daily_breakout)
-        array.push(arr_sector, current_sector)
+        record_setup(SETUP_GAP_UP_LONG, continuation ? 1 : 0, pending_gap_pct, pending_mcap, pending_pm_vol, pending_price_pos, pending_daily_breakout, pending_sector, pending_eps_surprise, pending_is_large_gap)
+        record_setup(SETUP_GAP_UP_SHORT, continuation ? 0 : 1, pending_gap_pct, pending_mcap, pending_pm_vol, pending_price_pos, pending_daily_breakout, pending_sector, pending_eps_surprise, pending_is_large_gap)
 
-        // Gap Up Short (reversal)
-        array.push(arr_setup_type, SETUP_GAP_UP_SHORT)
-        array.push(arr_outcome, continuation ? 0 : 1)
-        array.push(arr_gap_pct, gap_pct)
-        array.push(arr_mcap, market_cap_billions)
-        array.push(arr_volume, premarket_volume)
-        array.push(arr_timestamp, int(time))
-        array.push(arr_price_pos, price_position)
-        array.push(arr_has_breakout, is_daily_breakout)
-        array.push(arr_sector, current_sector)
-
-    // Gap Down setups
     if last_gap_dir < 0
-        // Gap Down Short (continuation)
-        array.push(arr_setup_type, SETUP_GAP_DOWN_SHORT)
-        array.push(arr_outcome, continuation ? 1 : 0)
-        array.push(arr_gap_pct, gap_pct)
-        array.push(arr_mcap, market_cap_billions)
-        array.push(arr_volume, premarket_volume)
-        array.push(arr_timestamp, int(time))
-        array.push(arr_price_pos, price_position)
-        array.push(arr_has_breakout, is_daily_breakout)
-        array.push(arr_sector, current_sector)
+        record_setup(SETUP_GAP_DOWN_SHORT, continuation ? 1 : 0, pending_gap_pct, pending_mcap, pending_pm_vol, pending_price_pos, pending_daily_breakout, pending_sector, pending_eps_surprise, pending_is_large_gap)
+        record_setup(SETUP_GAP_DOWN_LONG, continuation ? 0 : 1, pending_gap_pct, pending_mcap, pending_pm_vol, pending_price_pos, pending_daily_breakout, pending_sector, pending_eps_surprise, pending_is_large_gap)
 
-        // Gap Down Long (reversal)
-        array.push(arr_setup_type, SETUP_GAP_DOWN_LONG)
-        array.push(arr_outcome, continuation ? 0 : 1)
-        array.push(arr_gap_pct, gap_pct)
-        array.push(arr_mcap, market_cap_billions)
-        array.push(arr_volume, premarket_volume)
-        array.push(arr_timestamp, int(time))
-        array.push(arr_price_pos, price_position)
-        array.push(arr_has_breakout, is_daily_breakout)
-        array.push(arr_sector, current_sector)
+    if pending_green_turret
+        record_setup(SETUP_GREEN_TURRET, eod_result < 0 ? 1 : 0, pending_gap_pct, pending_mcap, pending_pm_vol, pending_price_pos, pending_daily_breakout, pending_sector, pending_eps_surprise, pending_is_large_gap)
 
-    // Green Turret
-    if green_turret_today
-        array.push(arr_setup_type, SETUP_GREEN_TURRET)
-        array.push(arr_outcome, eod_result < 0 ? 1 : 0)  // GT is a short setup after spike
-        array.push(arr_gap_pct, gap_pct)
-        array.push(arr_mcap, market_cap_billions)
-        array.push(arr_volume, premarket_volume)
-        array.push(arr_timestamp, int(time))
-        array.push(arr_price_pos, price_position)
-        array.push(arr_has_breakout, is_daily_breakout)
-        array.push(arr_sector, current_sector)
+    if pending_daily_breakout
+        record_setup(SETUP_DAILY_BREAKOUT, continuation ? 1 : 0, pending_gap_pct, pending_mcap, pending_pm_vol, pending_price_pos, pending_daily_breakout, pending_sector, pending_eps_surprise, pending_is_large_gap)
 
-    // Daily Breakout
-    if is_daily_breakout
-        array.push(arr_setup_type, SETUP_DAILY_BREAKOUT)
-        array.push(arr_outcome, continuation ? 1 : 0)
-        array.push(arr_gap_pct, gap_pct)
-        array.push(arr_mcap, market_cap_billions)
-        array.push(arr_volume, premarket_volume)
-        array.push(arr_timestamp, int(time))
-        array.push(arr_price_pos, price_position)
-        array.push(arr_has_breakout, is_daily_breakout)
-        array.push(arr_sector, current_sector)
+    if pending_has_pm_vol
+        record_setup(SETUP_PREMARKET, continuation ? 1 : 0, pending_gap_pct, pending_mcap, pending_pm_vol, pending_price_pos, pending_daily_breakout, pending_sector, pending_eps_surprise, pending_is_large_gap)
 
-    // Pre-market move
-    if has_premarket_volume
-        array.push(arr_setup_type, SETUP_PREMARKET)
-        array.push(arr_outcome, continuation ? 1 : 0)
-        array.push(arr_gap_pct, gap_pct)
-        array.push(arr_mcap, market_cap_billions)
-        array.push(arr_volume, premarket_volume)
-        array.push(arr_timestamp, int(time))
-        array.push(arr_price_pos, price_position)
-        array.push(arr_has_breakout, is_daily_breakout)
-        array.push(arr_sector, current_sector)
-
-    // Second movement
-    if is_second_move_long or is_second_move_short
-        array.push(arr_setup_type, SETUP_SECOND_MOVE)
-        array.push(arr_outcome, is_second_move_long and continuation or is_second_move_short and not continuation ? 1 : 0)
-        array.push(arr_gap_pct, gap_pct)
-        array.push(arr_mcap, market_cap_billions)
-        array.push(arr_volume, premarket_volume)
-        array.push(arr_timestamp, int(time))
-        array.push(arr_price_pos, price_position)
-        array.push(arr_has_breakout, is_daily_breakout)
-        array.push(arr_sector, current_sector)
+    if pending_second_move_long or pending_second_move_short
+        record_setup(SETUP_SECOND_MOVE, pending_second_move_long and continuation or pending_second_move_short and not continuation ? 1 : 0, pending_gap_pct, pending_mcap, pending_pm_vol, pending_price_pos, pending_daily_breakout, pending_sector, pending_eps_surprise, pending_is_large_gap)
 
     pending_outcome := false
 
@@ -363,10 +390,12 @@ if pending_outcome and timeframe.isdaily and bar_index > last_earnings_bar
 // SECTION 6: PROBABILITY & CONFIDENCE SCORING ENGINE
 // ============================================================================
 
-// --- Helper: Calculate probability for a setup type with optional filters ---
-calc_probability(int setup_type, bool use_mcap_filter, bool use_vol_filter, bool use_sector_filter, bool use_recent_only) =>
+// --- Enhanced probability calculation with additional filters ---
+calc_probability(int setup_type, bool use_mcap_filter, bool use_vol_filter, bool use_sector_filter, bool use_recent_only, bool use_gap_size_filter, bool use_price_pos_filter) =>
     int total = 0
     int success = 0
+    float sum_eps = 0.0
+    int eps_count = 0
     int n = array.size(arr_setup_type)
     int recent_cutoff = int(timenow - i_recent_days * 86400000)
     int season_cutoff = int(timenow - i_season_days * 86400000)
@@ -374,11 +403,9 @@ calc_probability(int setup_type, bool use_mcap_filter, bool use_vol_filter, bool
     if n > 0
         for i = 0 to n - 1
             if array.get(arr_setup_type, i) == setup_type
-                // Time filter
                 int ts = array.get(arr_timestamp, i)
                 bool time_ok = use_recent_only ? ts >= recent_cutoff : ts >= season_cutoff
 
-                // Market cap filter
                 float mcap = array.get(arr_mcap, i)
                 bool mcap_ok = true
                 if use_mcap_filter
@@ -386,69 +413,92 @@ calc_probability(int setup_type, bool use_mcap_filter, bool use_vol_filter, bool
                         mcap_ok := mcap >= i_mcap_threshold
                     else if i_mcap_filter_mode == "Below Threshold"
                         mcap_ok := mcap < i_mcap_threshold
-                    else
-                        mcap_ok := true
 
-                // Volume filter
                 float vol = array.get(arr_volume, i)
                 bool vol_ok = use_vol_filter ? vol >= i_vol_min : true
 
-                // Sector filter
                 string sec = array.get(arr_sector, i)
                 bool sec_ok = use_sector_filter and i_sector_filter != "All" ? sec == i_sector_filter : true
 
-                if time_ok and mcap_ok and vol_ok and sec_ok
+                // Gap size filter
+                bool gap_ok = true
+                if use_gap_size_filter and i_gap_size_filter != "All"
+                    bool is_lg = array.get(arr_is_large_gap, i)
+                    gap_ok := i_gap_size_filter == "Large (>= Large Threshold)" ? is_lg : not is_lg
+
+                // Price position filter
+                bool pos_ok = true
+                if use_price_pos_filter and i_price_pos_filter != "All"
+                    int pp = array.get(arr_price_pos, i)
+                    if i_price_pos_filter == "At Highs"
+                        pos_ok := pp == POS_AT_HIGHS
+                    else if i_price_pos_filter == "At Lows"
+                        pos_ok := pp == POS_AT_LOWS
+                    else
+                        pos_ok := pp == POS_MIDDLE
+
+                if time_ok and mcap_ok and vol_ok and sec_ok and gap_ok and pos_ok
                     total += 1
                     if array.get(arr_outcome, i) == 1
                         success += 1
+                    float eps_s = array.get(arr_eps_surprise, i)
+                    if not na(eps_s) and eps_s != 0
+                        sum_eps += eps_s
+                        eps_count += 1
 
     float prob = total >= i_min_samples ? (float(success) / float(total)) * 100.0 : na
-    [prob, total, success]
+    float avg_eps = eps_count > 0 ? sum_eps / float(eps_count) : na
+    [prob, total, success, avg_eps]
 
 
 // --- Calculate probabilities for all setup types ---
+bool use_gap_f = i_gap_size_filter != "All"
+bool use_pos_f = i_price_pos_filter != "All"
+
 // Full season probabilities
-[prob_gul, tot_gul, suc_gul]   = calc_probability(SETUP_GAP_UP_LONG, false, false, false, false)
-[prob_gus, tot_gus, suc_gus]   = calc_probability(SETUP_GAP_UP_SHORT, false, false, false, false)
-[prob_gdl, tot_gdl, suc_gdl]   = calc_probability(SETUP_GAP_DOWN_LONG, false, false, false, false)
-[prob_gds, tot_gds, suc_gds]   = calc_probability(SETUP_GAP_DOWN_SHORT, false, false, false, false)
-[prob_gt, tot_gt, suc_gt]      = calc_probability(SETUP_GREEN_TURRET, false, false, false, false)
-[prob_pm, tot_pm, suc_pm]      = calc_probability(SETUP_PREMARKET, false, false, false, false)
-[prob_sm, tot_sm, suc_sm]      = calc_probability(SETUP_SECOND_MOVE, false, false, false, false)
-[prob_db, tot_db, suc_db]      = calc_probability(SETUP_DAILY_BREAKOUT, false, false, false, false)
+[prob_gul, tot_gul, suc_gul, eps_gul] = calc_probability(SETUP_GAP_UP_LONG, false, false, false, false, false, false)
+[prob_gus, tot_gus, suc_gus, eps_gus] = calc_probability(SETUP_GAP_UP_SHORT, false, false, false, false, false, false)
+[prob_gdl, tot_gdl, suc_gdl, eps_gdl] = calc_probability(SETUP_GAP_DOWN_LONG, false, false, false, false, false, false)
+[prob_gds, tot_gds, suc_gds, eps_gds] = calc_probability(SETUP_GAP_DOWN_SHORT, false, false, false, false, false, false)
+[prob_gt, tot_gt, suc_gt, eps_gt]     = calc_probability(SETUP_GREEN_TURRET, false, false, false, false, false, false)
+[prob_pm, tot_pm, suc_pm, eps_pm]     = calc_probability(SETUP_PREMARKET, false, false, false, false, false, false)
+[prob_sm, tot_sm, suc_sm, eps_sm]     = calc_probability(SETUP_SECOND_MOVE, false, false, false, false, false, false)
+[prob_db, tot_db, suc_db, eps_db]     = calc_probability(SETUP_DAILY_BREAKOUT, false, false, false, false, false, false)
 
 // Recent window probabilities
-[rprob_gul, rtot_gul, rsuc_gul] = calc_probability(SETUP_GAP_UP_LONG, false, false, false, true)
-[rprob_gus, rtot_gus, rsuc_gus] = calc_probability(SETUP_GAP_UP_SHORT, false, false, false, true)
-[rprob_gdl, rtot_gdl, rsuc_gdl] = calc_probability(SETUP_GAP_DOWN_LONG, false, false, false, true)
-[rprob_gds, rtot_gds, rsuc_gds] = calc_probability(SETUP_GAP_DOWN_SHORT, false, false, false, true)
-[rprob_gt, rtot_gt, rsuc_gt]    = calc_probability(SETUP_GREEN_TURRET, false, false, false, true)
-[rprob_pm, rtot_pm, rsuc_pm]    = calc_probability(SETUP_PREMARKET, false, false, false, true)
-[rprob_sm, rtot_sm, rsuc_sm]    = calc_probability(SETUP_SECOND_MOVE, false, false, false, true)
-[rprob_db, rtot_db, rsuc_db]    = calc_probability(SETUP_DAILY_BREAKOUT, false, false, false, true)
+[rprob_gul, rtot_gul, rsuc_gul, _r1] = calc_probability(SETUP_GAP_UP_LONG, false, false, false, true, false, false)
+[rprob_gus, rtot_gus, rsuc_gus, _r2] = calc_probability(SETUP_GAP_UP_SHORT, false, false, false, true, false, false)
+[rprob_gdl, rtot_gdl, rsuc_gdl, _r3] = calc_probability(SETUP_GAP_DOWN_LONG, false, false, false, true, false, false)
+[rprob_gds, rtot_gds, rsuc_gds, _r4] = calc_probability(SETUP_GAP_DOWN_SHORT, false, false, false, true, false, false)
+[rprob_gt, rtot_gt, rsuc_gt, _r5]    = calc_probability(SETUP_GREEN_TURRET, false, false, false, true, false, false)
+[rprob_pm, rtot_pm, rsuc_pm, _r6]    = calc_probability(SETUP_PREMARKET, false, false, false, true, false, false)
+[rprob_sm, rtot_sm, rsuc_sm, _r7]    = calc_probability(SETUP_SECOND_MOVE, false, false, false, true, false, false)
+[rprob_db, rtot_db, rsuc_db, _r8]    = calc_probability(SETUP_DAILY_BREAKOUT, false, false, false, true, false, false)
 
-// Filtered probabilities (with all active filters)
+// Filtered probabilities (all active filters including new gap size & price position)
 bool use_mcap = i_mcap_filter_mode != "All"
 bool use_vol  = i_vol_min > 0
 bool use_sec  = i_sector_filter != "All"
 
-[fprob_gul, ftot_gul, fsuc_gul] = calc_probability(SETUP_GAP_UP_LONG, use_mcap, use_vol, use_sec, false)
-[fprob_gus, ftot_gus, fsuc_gus] = calc_probability(SETUP_GAP_UP_SHORT, use_mcap, use_vol, use_sec, false)
-[fprob_gdl, ftot_gdl, fsuc_gdl] = calc_probability(SETUP_GAP_DOWN_LONG, use_mcap, use_vol, use_sec, false)
-[fprob_gds, ftot_gds, fsuc_gds] = calc_probability(SETUP_GAP_DOWN_SHORT, use_mcap, use_vol, use_sec, false)
-[fprob_gt, ftot_gt, fsuc_gt]    = calc_probability(SETUP_GREEN_TURRET, use_mcap, use_vol, use_sec, false)
-[fprob_pm, ftot_pm, fsuc_pm]    = calc_probability(SETUP_PREMARKET, use_mcap, use_vol, use_sec, false)
-[fprob_sm, ftot_sm, fsuc_sm]    = calc_probability(SETUP_SECOND_MOVE, use_mcap, use_vol, use_sec, false)
-[fprob_db, ftot_db, fsuc_db]    = calc_probability(SETUP_DAILY_BREAKOUT, use_mcap, use_vol, use_sec, false)
+[fprob_gul, ftot_gul, fsuc_gul, _f1] = calc_probability(SETUP_GAP_UP_LONG, use_mcap, use_vol, use_sec, false, use_gap_f, use_pos_f)
+[fprob_gus, ftot_gus, fsuc_gus, _f2] = calc_probability(SETUP_GAP_UP_SHORT, use_mcap, use_vol, use_sec, false, use_gap_f, use_pos_f)
+[fprob_gdl, ftot_gdl, fsuc_gdl, _f3] = calc_probability(SETUP_GAP_DOWN_LONG, use_mcap, use_vol, use_sec, false, use_gap_f, use_pos_f)
+[fprob_gds, ftot_gds, fsuc_gds, _f4] = calc_probability(SETUP_GAP_DOWN_SHORT, use_mcap, use_vol, use_sec, false, use_gap_f, use_pos_f)
+[fprob_gt, ftot_gt, fsuc_gt, _f5]    = calc_probability(SETUP_GREEN_TURRET, use_mcap, use_vol, use_sec, false, use_gap_f, use_pos_f)
+[fprob_pm, ftot_pm, fsuc_pm, _f6]    = calc_probability(SETUP_PREMARKET, use_mcap, use_vol, use_sec, false, use_gap_f, use_pos_f)
+[fprob_sm, ftot_sm, fsuc_sm, _f7]    = calc_probability(SETUP_SECOND_MOVE, use_mcap, use_vol, use_sec, false, use_gap_f, use_pos_f)
+[fprob_db, ftot_db, fsuc_db, _f8]    = calc_probability(SETUP_DAILY_BREAKOUT, use_mcap, use_vol, use_sec, false, use_gap_f, use_pos_f)
 
 
-// --- Confidence Score Calculation ---
-calc_confidence(float base_prob, float recent_prob, bool mcap_match, bool vol_match, bool sector_match, bool breakout_match) =>
+// ============================================================================
+// SECTION 7: ENHANCED CONFIDENCE SCORING
+// ============================================================================
+
+calc_confidence(float base_prob, float recent_prob, bool mcap_match, bool vol_match, bool sector_match, bool breakout_match, bool has_eps_beat, bool large_gap, float gap_fill_rt) =>
     if na(base_prob)
         float(na)
     else
         float score = base_prob
-        // Apply multipliers when conditions are favorable
         if mcap_match
             score *= i_mcap_weight
         if vol_match
@@ -457,9 +507,17 @@ calc_confidence(float base_prob, float recent_prob, bool mcap_match, bool vol_ma
             score *= i_sector_weight
         if breakout_match
             score *= i_breakout_weight
-        // Recency boost: if recent probability is better than season
         if not na(recent_prob) and recent_prob > base_prob
             score *= i_recency_weight
+        // EPS surprise boost
+        if has_eps_beat
+            score *= i_eps_weight
+        // Large gap bonus (stronger moves tend to continue)
+        if large_gap
+            score *= 1.05
+        // Gap fill penalty (if gaps historically fill, reduce confidence)
+        if not na(gap_fill_rt) and gap_fill_rt > 50
+            score *= i_gap_fill_weight
         math.min(score, 100.0)
 
 // Current conditions
@@ -468,15 +526,14 @@ bool vol_match     = premarket_volume >= i_vol_min
 bool sector_match  = i_sector_filter == "All" or current_sector == i_sector_filter
 bool breakout_match = is_daily_breakout
 
-// Confidence scores for each setup
-float conf_gul = calc_confidence(prob_gul, rprob_gul, mcap_match, vol_match, sector_match, breakout_match)
-float conf_gus = calc_confidence(prob_gus, rprob_gus, mcap_match, vol_match, sector_match, breakout_match)
-float conf_gdl = calc_confidence(prob_gdl, rprob_gdl, mcap_match, vol_match, sector_match, breakout_match)
-float conf_gds = calc_confidence(prob_gds, rprob_gds, mcap_match, vol_match, sector_match, breakout_match)
-float conf_gt  = calc_confidence(prob_gt, rprob_gt, mcap_match, vol_match, sector_match, breakout_match)
-float conf_pm  = calc_confidence(prob_pm, rprob_pm, mcap_match, vol_match, sector_match, breakout_match)
-float conf_sm  = calc_confidence(prob_sm, rprob_sm, mcap_match, vol_match, sector_match, breakout_match)
-float conf_db  = calc_confidence(prob_db, rprob_db, mcap_match, vol_match, sector_match, breakout_match)
+float conf_gul = calc_confidence(prob_gul, rprob_gul, mcap_match, vol_match, sector_match, breakout_match, eps_is_beat, is_large_gap, gap_fill_rate)
+float conf_gus = calc_confidence(prob_gus, rprob_gus, mcap_match, vol_match, sector_match, breakout_match, eps_is_beat, is_large_gap, gap_fill_rate)
+float conf_gdl = calc_confidence(prob_gdl, rprob_gdl, mcap_match, vol_match, sector_match, breakout_match, eps_is_beat, is_large_gap, gap_fill_rate)
+float conf_gds = calc_confidence(prob_gds, rprob_gds, mcap_match, vol_match, sector_match, breakout_match, eps_is_beat, is_large_gap, gap_fill_rate)
+float conf_gt  = calc_confidence(prob_gt, rprob_gt, mcap_match, vol_match, sector_match, breakout_match, eps_is_beat, is_large_gap, gap_fill_rate)
+float conf_pm  = calc_confidence(prob_pm, rprob_pm, mcap_match, vol_match, sector_match, breakout_match, eps_is_beat, is_large_gap, gap_fill_rate)
+float conf_sm  = calc_confidence(prob_sm, rprob_sm, mcap_match, vol_match, sector_match, breakout_match, eps_is_beat, is_large_gap, gap_fill_rate)
+float conf_db  = calc_confidence(prob_db, rprob_db, mcap_match, vol_match, sector_match, breakout_match, eps_is_beat, is_large_gap, gap_fill_rate)
 
 // --- Determine Active Setup & Best Confidence ---
 var float active_confidence = na
@@ -484,9 +541,8 @@ var int   active_setup_type = -1
 var string active_signal_text = ""
 
 if is_earnings_bar
-    // Find the highest confidence setup currently active
     float best_conf = 0.0
-    int best_type = -1
+    int   best_type = -1
 
     if is_gap_up and not na(conf_gul) and conf_gul > best_conf
         best_conf := conf_gul
@@ -516,45 +572,81 @@ if is_earnings_bar
 
 
 // ============================================================================
-// SECTION 7: BACKTESTING P&L TRACKER
+// SECTION 8: ENHANCED BACKTESTING P&L TRACKER
 // ============================================================================
 
-var float cumulative_pnl = 0.0
-var int   total_trades   = 0
-var int   winning_trades = 0
-var int   losing_trades  = 0
-var float max_drawdown   = 0.0
-var float peak_pnl       = 0.0
-var float hypothetical_pnl = 0.0
+var float cumulative_pnl  = 0.0
+var int   total_trades     = 0
+var int   winning_trades   = 0
+var int   losing_trades    = 0
+var float max_drawdown     = 0.0
+var float peak_pnl         = 0.0
+var int   max_consec_wins  = 0
+var int   max_consec_losses = 0
+var float sum_win_pnl      = 0.0
+var float sum_loss_pnl     = 0.0
 
-// On each recorded outcome, track hypothetical P&L
 int n_outcomes = array.size(arr_outcome)
 if n_outcomes > 0 and barstate.islast
     cumulative_pnl := 0.0
     total_trades := 0
     winning_trades := 0
     losing_trades := 0
+    max_consec_wins := 0
+    max_consec_losses := 0
+    sum_win_pnl := 0.0
+    sum_loss_pnl := 0.0
+    peak_pnl := 0.0
+    max_drawdown := 0.0
+    int cur_wins = 0
+    int cur_losses = 0
 
     for i = 0 to n_outcomes - 1
         int outcome = array.get(arr_outcome, i)
         total_trades += 1
         if outcome == 1
             winning_trades += 1
-            cumulative_pnl += i_base_risk_pct * i_risk_reward
+            float win_pnl = i_base_risk_pct * i_risk_reward
+            cumulative_pnl += win_pnl
+            sum_win_pnl += win_pnl
+            cur_wins += 1
+            cur_losses := 0
+            max_consec_wins := math.max(max_consec_wins, cur_wins)
         else
             losing_trades += 1
             cumulative_pnl -= i_base_risk_pct
+            sum_loss_pnl += i_base_risk_pct
+            cur_losses += 1
+            cur_wins := 0
+            max_consec_losses := math.max(max_consec_losses, cur_losses)
 
         peak_pnl := math.max(peak_pnl, cumulative_pnl)
         float dd = peak_pnl - cumulative_pnl
         max_drawdown := math.max(max_drawdown, dd)
 
 float win_rate = total_trades > 0 ? (float(winning_trades) / float(total_trades)) * 100.0 : 0.0
-float profit_factor = losing_trades > 0 and winning_trades > 0 ? (float(winning_trades) * i_risk_reward) / float(losing_trades) : 0.0
+float profit_factor = losing_trades > 0 and sum_loss_pnl > 0 ? sum_win_pnl / sum_loss_pnl : 0.0
+float expectancy = total_trades > 0 ? cumulative_pnl / float(total_trades) : 0.0
+
+// Kelly criterion: f* = (bp - q) / b, where b=R:R, p=win_rate, q=1-p
+float kelly_fraction = 0.0
+if total_trades > 0
+    float p = win_rate / 100.0
+    float q = 1.0 - p
+    float b = i_risk_reward
+    kelly_fraction := b > 0 ? math.max(0.0, (b * p - q) / b) * 100.0 : 0.0
+
+// Position size based on mode
+float suggested_risk_pct = i_base_risk_pct
+if i_position_mode == "Confidence-Based" and not na(active_confidence)
+    suggested_risk_pct := i_base_risk_pct * (active_confidence / 100.0) * 2.0
+    suggested_risk_pct := math.min(suggested_risk_pct, i_base_risk_pct * 3.0)
+else if i_position_mode == "Kelly"
+    suggested_risk_pct := kelly_fraction > 0 ? math.min(kelly_fraction, i_base_risk_pct * 3.0) : i_base_risk_pct * 0.5
 
 
 // ============================================================================
-// SECTION 8: VISUALIZATION - DASHBOARD TABLE
+// SECTION 9: VISUALIZATION - DASHBOARD TABLE
 // ============================================================================
 
 get_table_pos() =>
@@ -606,15 +698,25 @@ format_conf(float c) =>
         string level = c >= CONF_HIGH ? " H" : c >= CONF_MEDIUM ? " M" : c >= CONF_LOW ? " L" : " X"
         str.tostring(c, "#.0") + level
 
+// Trend arrow based on recent vs season probability
+trend_arrow(float season_prob, float recent_prob) =>
+    if na(season_prob) or na(recent_prob)
+        ""
+    else if recent_prob > season_prob + 5
+        " ▲"
+    else if recent_prob < season_prob - 5
+        " ▼"
+    else
+        " ─"
+
 var table dashboard = na
 
 if i_show_table and barstate.islast
-    // Create table: 9 columns x 12 rows
-    dashboard := table.new(get_table_pos(), 9, 14, bgcolor = color.new(color.black, 85), border_width = 1, border_color = color.new(color.gray, 50), frame_width = 2, frame_color = color.new(color.white, 70))
+    dashboard := table.new(get_table_pos(), 10, 16, bgcolor = color.new(color.black, 85), border_width = 1, border_color = color.new(color.gray, 50), frame_width = 2, frame_color = color.new(color.white, 70))
     string txt_size = get_text_size()
 
     // --- Header Row ---
-    table.cell(dashboard, 0, 0, "EARNINGS TRACKER", text_color = color.white, text_size = txt_size, bgcolor = color.new(color.blue, 60), text_halign = text.align_left)
+    table.cell(dashboard, 0, 0, "EARNINGS TRACKER v2", text_color = color.white, text_size = txt_size, bgcolor = color.new(color.blue, 60), text_halign = text.align_left, tooltip = "Enhanced Earnings Season Tracker with EPS Surprise & Gap Fill Analysis")
     table.cell(dashboard, 1, 0, syminfo.ticker, text_color = color.yellow, text_size = txt_size, bgcolor = color.new(color.blue, 60))
     table.cell(dashboard, 2, 0, current_sector, text_color = color.white, text_size = txt_size, bgcolor = color.new(color.blue, 60))
     table.cell(dashboard, 3, 0, "MCap: " + str.tostring(market_cap_billions, "#.1") + "B", text_color = color.white, text_size = txt_size, bgcolor = color.new(color.blue, 60))
@@ -623,40 +725,43 @@ if i_show_table and barstate.islast
     table.cell(dashboard, 6, 0, "", text_color = color.white, text_size = txt_size, bgcolor = color.new(color.blue, 60))
     table.cell(dashboard, 7, 0, "", text_color = color.white, text_size = txt_size, bgcolor = color.new(color.blue, 60))
     table.cell(dashboard, 8, 0, "", text_color = color.white, text_size = txt_size, bgcolor = color.new(color.blue, 60))
-    table.merge_cells(dashboard, 4, 0, 8, 0)
+    table.cell(dashboard, 9, 0, "", text_color = color.white, text_size = txt_size, bgcolor = color.new(color.blue, 60))
+    table.merge_cells(dashboard, 4, 0, 9, 0)
 
     // --- Column Headers ---
-    table.cell(dashboard, 0, 1, "Setup Type", text_color = color.white, text_size = txt_size, bgcolor = color.new(color.gray, 60))
-    table.cell(dashboard, 1, 1, "Total", text_color = color.white, text_size = txt_size, bgcolor = color.new(color.gray, 60))
-    table.cell(dashboard, 2, 1, "Won", text_color = color.white, text_size = txt_size, bgcolor = color.new(color.gray, 60))
-    table.cell(dashboard, 3, 1, "Prob%", text_color = color.white, text_size = txt_size, bgcolor = color.new(color.gray, 60))
-    table.cell(dashboard, 4, 1, str.tostring(i_recent_days) + "D Prob%", text_color = color.white, text_size = txt_size, bgcolor = color.new(color.gray, 60))
-    table.cell(dashboard, 5, 1, "Filt Prob%", text_color = color.white, text_size = txt_size, bgcolor = color.new(color.gray, 60))
-    table.cell(dashboard, 6, 1, "Score", text_color = color.white, text_size = txt_size, bgcolor = color.new(color.gray, 60))
-    table.cell(dashboard, 7, 1, "Filt Tot", text_color = color.white, text_size = txt_size, bgcolor = color.new(color.gray, 60))
-    table.cell(dashboard, 8, 1, "Filt Won", text_color = color.white, text_size = txt_size, bgcolor = color.new(color.gray, 60))
+    table.cell(dashboard, 0, 1, "Setup Type", text_color = color.white, text_size = txt_size, bgcolor = color.new(color.gray, 60), tooltip = "Type of post-earnings setup detected")
+    table.cell(dashboard, 1, 1, "Total", text_color = color.white, text_size = txt_size, bgcolor = color.new(color.gray, 60), tooltip = "Total number of setups recorded this season")
+    table.cell(dashboard, 2, 1, "Won", text_color = color.white, text_size = txt_size, bgcolor = color.new(color.gray, 60), tooltip = "Number of successful outcomes")
+    table.cell(dashboard, 3, 1, "Prob%", text_color = color.white, text_size = txt_size, bgcolor = color.new(color.gray, 60), tooltip = "Win probability over full season window")
+    table.cell(dashboard, 4, 1, str.tostring(i_recent_days) + "D Prob%", text_color = color.white, text_size = txt_size, bgcolor = color.new(color.gray, 60), tooltip = "Win probability over recent " + str.tostring(i_recent_days) + " days only")
+    table.cell(dashboard, 5, 1, "Trend", text_color = color.white, text_size = txt_size, bgcolor = color.new(color.gray, 60), tooltip = "▲ recent > season, ▼ recent < season, ─ stable")
+    table.cell(dashboard, 6, 1, "Filt Prob%", text_color = color.white, text_size = txt_size, bgcolor = color.new(color.gray, 60), tooltip = "Win probability with all active filters applied")
+    table.cell(dashboard, 7, 1, "Score", text_color = color.white, text_size = txt_size, bgcolor = color.new(color.gray, 60), tooltip = "Composite confidence score (0-100) with parameter multipliers")
+    table.cell(dashboard, 8, 1, "Avg EPS%", text_color = color.white, text_size = txt_size, bgcolor = color.new(color.gray, 60), tooltip = "Average EPS surprise % for this setup type")
+    table.cell(dashboard, 9, 1, "Filt Tot", text_color = color.white, text_size = txt_size, bgcolor = color.new(color.gray, 60), tooltip = "Total setups matching current filter criteria")
 
     // --- Data Rows ---
-    // Row helper
-    fill_row(int row, string name, int total, int success, float prob, float rprob, float fprob, float conf, int ftotal, int fsuccess) =>
+    fill_row(int row, string name, int total, int success, float prob, float rprob, float fprob, float conf, float avg_eps_s, int ftotal) =>
+        string trend = trend_arrow(prob, rprob)
         table.cell(dashboard, 0, row, name, text_color = color.white, text_size = txt_size, text_halign = text.align_left)
         table.cell(dashboard, 1, row, str.tostring(total), text_color = color.white, text_size = txt_size)
         table.cell(dashboard, 2, row, str.tostring(success), text_color = color.white, text_size = txt_size)
         table.cell(dashboard, 3, row, format_prob(prob), text_color = color.white, text_size = txt_size, bgcolor = prob_color(prob))
         table.cell(dashboard, 4, row, format_prob(rprob), text_color = color.white, text_size = txt_size, bgcolor = prob_color(rprob))
-        table.cell(dashboard, 5, row, format_prob(fprob), text_color = color.white, text_size = txt_size, bgcolor = prob_color(fprob))
-        table.cell(dashboard, 6, row, format_conf(conf), text_color = color.white, text_size = txt_size, bgcolor = conf_color(conf))
-        table.cell(dashboard, 7, row, str.tostring(ftotal), text_color = color.white, text_size = txt_size)
-        table.cell(dashboard, 8, row, str.tostring(fsuccess), text_color = color.white, text_size = txt_size)
+        table.cell(dashboard, 5, row, trend, text_color = trend == " ▲" ? color.lime : trend == " ▼" ? color.red : color.gray, text_size = txt_size)
+        table.cell(dashboard, 6, row, format_prob(fprob), text_color = color.white, text_size = txt_size, bgcolor = prob_color(fprob))
+        table.cell(dashboard, 7, row, format_conf(conf), text_color = color.white, text_size = txt_size, bgcolor = conf_color(conf))
+        table.cell(dashboard, 8, row, na(avg_eps_s) ? "---" : str.tostring(avg_eps_s, "#.1") + "%", text_color = not na(avg_eps_s) and avg_eps_s > 0 ? color.lime : not na(avg_eps_s) and avg_eps_s < 0 ? color.red : color.gray, text_size = txt_size)
+        table.cell(dashboard, 9, row, str.tostring(ftotal), text_color = color.white, text_size = txt_size)
 
-    fill_row(2, "Gap Up Long",     tot_gul, suc_gul, prob_gul, rprob_gul, fprob_gul, conf_gul, ftot_gul, fsuc_gul)
-    fill_row(3, "Gap Up Short",    tot_gus, suc_gus, prob_gus, rprob_gus, fprob_gus, conf_gus, ftot_gus, fsuc_gus)
-    fill_row(4, "Gap Dn Long",     tot_gdl, suc_gdl, prob_gdl, rprob_gdl, fprob_gdl, conf_gdl, ftot_gdl, fsuc_gdl)
-    fill_row(5, "Gap Dn Short",    tot_gds, suc_gds, prob_gds, rprob_gds, fprob_gds, conf_gds, ftot_gds, fsuc_gds)
-    fill_row(6, "Green Turret",    tot_gt, suc_gt, prob_gt, rprob_gt, fprob_gt, conf_gt, ftot_gt, fsuc_gt)
-    fill_row(7, "Pre-Mkt Move",    tot_pm, suc_pm, prob_pm, rprob_pm, fprob_pm, conf_pm, ftot_pm, fsuc_pm)
-    fill_row(8, "2nd Movement",    tot_sm, suc_sm, prob_sm, rprob_sm, fprob_sm, conf_sm, ftot_sm, fsuc_sm)
-    fill_row(9, "Daily Brkout",    tot_db, suc_db, prob_db, rprob_db, fprob_db, conf_db, ftot_db, fsuc_db)
+    fill_row(2, "Gap Up Long",     tot_gul, suc_gul, prob_gul, rprob_gul, fprob_gul, conf_gul, eps_gul, ftot_gul)
+    fill_row(3, "Gap Up Short",    tot_gus, suc_gus, prob_gus, rprob_gus, fprob_gus, conf_gus, eps_gus, ftot_gus)
+    fill_row(4, "Gap Dn Long",     tot_gdl, suc_gdl, prob_gdl, rprob_gdl, fprob_gdl, conf_gdl, eps_gdl, ftot_gdl)
+    fill_row(5, "Gap Dn Short",    tot_gds, suc_gds, prob_gds, rprob_gds, fprob_gds, conf_gds, eps_gds, ftot_gds)
+    fill_row(6, "Green Turret",    tot_gt, suc_gt, prob_gt, rprob_gt, fprob_gt, conf_gt, eps_gt, ftot_gt)
+    fill_row(7, "Pre-Mkt Move",    tot_pm, suc_pm, prob_pm, rprob_pm, fprob_pm, conf_pm, eps_pm, ftot_pm)
+    fill_row(8, "2nd Movement",    tot_sm, suc_sm, prob_sm, rprob_sm, fprob_sm, conf_sm, eps_sm, ftot_sm)
+    fill_row(9, "Daily Brkout",    tot_db, suc_db, prob_db, rprob_db, fprob_db, conf_db, eps_db, ftot_db)
 
     // --- Filter Status Row ---
     string filter_text = "Filters:"
@@ -666,6 +771,10 @@ if i_show_table and barstate.islast
         filter_text += " Vol>" + str.tostring(i_vol_min, "#") + " |"
     if i_sector_filter != "All"
         filter_text += " " + i_sector_filter + " |"
+    if i_gap_size_filter != "All"
+        filter_text += " Gap: " + i_gap_size_filter + " |"
+    if i_price_pos_filter != "All"
+        filter_text += " Pos: " + i_price_pos_filter + " |"
     if filter_text == "Filters:"
         filter_text += " None (showing all)"
 
@@ -678,7 +787,8 @@ if i_show_table and barstate.islast
     table.cell(dashboard, 6, 10, "", bgcolor = color.new(color.black, 85))
     table.cell(dashboard, 7, 10, "", bgcolor = color.new(color.black, 85))
     table.cell(dashboard, 8, 10, "", bgcolor = color.new(color.black, 85))
-    table.merge_cells(dashboard, 0, 10, 8, 10)
+    table.cell(dashboard, 9, 10, "", bgcolor = color.new(color.black, 85))
+    table.merge_cells(dashboard, 0, 10, 9, 10)
 
     // --- Active Signal Row ---
     string sig_text = active_setup_type >= 0 ? "ACTIVE: " + active_signal_text : "No Active Signal"
@@ -692,11 +802,12 @@ if i_show_table and barstate.islast
     table.cell(dashboard, 6, 11, "", bgcolor = sig_bg)
     table.cell(dashboard, 7, 11, "", bgcolor = sig_bg)
     table.cell(dashboard, 8, 11, "", bgcolor = sig_bg)
-    table.merge_cells(dashboard, 0, 11, 8, 11)
+    table.cell(dashboard, 9, 11, "", bgcolor = sig_bg)
+    table.merge_cells(dashboard, 0, 11, 9, 11)
 
     // --- Backtest Summary Row ---
     string bt_text = "Backtest: " + str.tostring(total_trades) + " trades | WR: " + str.tostring(win_rate, "#.1") + "% | PF: " + str.tostring(profit_factor, "#.2") + " | P&L: " + str.tostring(cumulative_pnl, "#.1") + "R | MaxDD: " + str.tostring(max_drawdown, "#.1") + "R"
-    table.cell(dashboard, 0, 12, bt_text, text_color = cumulative_pnl >= 0 ? color.lime : color.red, text_size = txt_size, bgcolor = color.new(color.black, 70), text_halign = text.align_left)
+    table.cell(dashboard, 0, 12, bt_text, text_color = cumulative_pnl >= 0 ? color.lime : color.red, text_size = txt_size, bgcolor = color.new(color.black, 70), text_halign = text.align_left, tooltip = "Hypothetical P&L based on fixed risk per trade. WR=Win Rate, PF=Profit Factor, MaxDD=Maximum Drawdown in R-multiples")
     table.cell(dashboard, 1, 12, "", bgcolor = color.new(color.black, 70))
     table.cell(dashboard, 2, 12, "", bgcolor = color.new(color.black, 70))
     table.cell(dashboard, 3, 12, "", bgcolor = color.new(color.black, 70))
@@ -705,11 +816,12 @@ if i_show_table and barstate.islast
     table.cell(dashboard, 6, 12, "", bgcolor = color.new(color.black, 70))
     table.cell(dashboard, 7, 12, "", bgcolor = color.new(color.black, 70))
     table.cell(dashboard, 8, 12, "", bgcolor = color.new(color.black, 70))
-    table.merge_cells(dashboard, 0, 12, 8, 12)
+    table.cell(dashboard, 9, 12, "", bgcolor = color.new(color.black, 70))
+    table.merge_cells(dashboard, 0, 12, 9, 12)
 
-    // --- Price Position Row ---
-    string pos_text = "Price Position: " + (price_position == POS_AT_HIGHS ? "AT HIGHS" : price_position == POS_AT_LOWS ? "AT LOWS" : "MIDDLE") + " | Gap: " + str.tostring(gap_pct, "#.1") + "% | PM Vol: " + str.tostring(premarket_volume, "#")
-    table.cell(dashboard, 0, 13, pos_text, text_color = color.white, text_size = txt_size, bgcolor = color.new(color.black, 70), text_halign = text.align_left)
+    // --- Enhanced Stats Row (expectancy, streaks, Kelly) ---
+    string stats_text = "Expect: " + str.tostring(expectancy, "#.2") + "R | Kelly: " + str.tostring(kelly_fraction, "#.1") + "% | MaxW: " + str.tostring(max_consec_wins) + " | MaxL: " + str.tostring(max_consec_losses) + " | Risk: " + str.tostring(suggested_risk_pct, "#.2") + "%"
+    table.cell(dashboard, 0, 13, stats_text, text_color = expectancy >= 0 ? color.lime : color.red, text_size = txt_size, bgcolor = color.new(color.black, 70), text_halign = text.align_left, tooltip = "Expect=Average P&L per trade, Kelly=Optimal bet fraction, MaxW/MaxL=Max consecutive wins/losses, Risk=Suggested position risk %")
     table.cell(dashboard, 1, 13, "", bgcolor = color.new(color.black, 70))
     table.cell(dashboard, 2, 13, "", bgcolor = color.new(color.black, 70))
     table.cell(dashboard, 3, 13, "", bgcolor = color.new(color.black, 70))
@@ -718,11 +830,47 @@ if i_show_table and barstate.islast
     table.cell(dashboard, 6, 13, "", bgcolor = color.new(color.black, 70))
     table.cell(dashboard, 7, 13, "", bgcolor = color.new(color.black, 70))
     table.cell(dashboard, 8, 13, "", bgcolor = color.new(color.black, 70))
-    table.merge_cells(dashboard, 0, 13, 8, 13)
+    table.cell(dashboard, 9, 13, "", bgcolor = color.new(color.black, 70))
+    table.merge_cells(dashboard, 0, 13, 9, 13)
+
+    // --- Market Context Row ---
+    string pos_label = price_position == POS_AT_HIGHS ? "AT HIGHS" : price_position == POS_AT_LOWS ? "AT LOWS" : "MIDDLE"
+    string wk_trend = weekly_bullish ? "▲ Bullish" : weekly_bearish ? "▼ Bearish" : "─ Neutral"
+    string eps_streak_text = eps_beat_streak > 0 ? str.tostring(eps_beat_streak) + " beats" : eps_miss_streak > 0 ? str.tostring(eps_miss_streak) + " misses" : "---"
+    string expected_move_text = not na(avg_earnings_gap) ? str.tostring(avg_earnings_gap, "#.1") + "% ±" + str.tostring(nz(stdev_earnings_gap), "#.1") : "N/A"
+    string gap_fill_text = not na(gap_fill_rate) ? str.tostring(gap_fill_rate, "#.0") + "%" : "N/A"
+    string ctx_text = "Pos: " + pos_label + " | Wk: " + wk_trend + " | EPS Streak: " + eps_streak_text + " | ExpMove: " + expected_move_text + " | GapFill: " + gap_fill_text + " | RVol: " + str.tostring(relative_volume, "#.1") + "x | HV: " + str.tostring(hist_volatility, "#.0") + "%"
+    table.cell(dashboard, 0, 14, ctx_text, text_color = color.white, text_size = txt_size, bgcolor = color.new(color.black, 70), text_halign = text.align_left, tooltip = "Pos=52-week price position, Wk=Weekly trend, EPS Streak=Consecutive beats/misses, ExpMove=Avg historical earnings gap ± stdev, GapFill=Historical gap fill rate, RVol=Relative volume vs 20-day avg, HV=20-day historical volatility annualized")
+    table.cell(dashboard, 1, 14, "", bgcolor = color.new(color.black, 70))
+    table.cell(dashboard, 2, 14, "", bgcolor = color.new(color.black, 70))
+    table.cell(dashboard, 3, 14, "", bgcolor = color.new(color.black, 70))
+    table.cell(dashboard, 4, 14, "", bgcolor = color.new(color.black, 70))
+    table.cell(dashboard, 5, 14, "", bgcolor = color.new(color.black, 70))
+    table.cell(dashboard, 6, 14, "", bgcolor = color.new(color.black, 70))
+    table.cell(dashboard, 7, 14, "", bgcolor = color.new(color.black, 70))
+    table.cell(dashboard, 8, 14, "", bgcolor = color.new(color.black, 70))
+    table.cell(dashboard, 9, 14, "", bgcolor = color.new(color.black, 70))
+    table.merge_cells(dashboard, 0, 14, 9, 14)
+
+    // --- Gap & EPS Info Row ---
+    string eps_text = not na(eps_surprise_pct) ? "EPS: " + str.tostring(earnings_actual, "#.2") + " vs " + str.tostring(earnings_estimate, "#.2") + " (" + (eps_is_beat ? "+" : "") + str.tostring(eps_surprise_pct, "#.1") + "% surprise)" : "EPS: No data"
+    string gap_text = " | Gap: " + str.tostring(gap_pct, "#.1") + "%" + (is_large_gap ? " (LARGE)" : "") + " | PM Vol: " + str.tostring(premarket_volume, "#")
+    color eps_row_color = eps_is_beat ? color.new(color.green, 70) : eps_is_miss ? color.new(color.red, 70) : color.new(color.black, 70)
+    table.cell(dashboard, 0, 15, eps_text + gap_text, text_color = color.white, text_size = txt_size, bgcolor = eps_row_color, text_halign = text.align_left, tooltip = "Current bar EPS data and gap statistics")
+    table.cell(dashboard, 1, 15, "", bgcolor = eps_row_color)
+    table.cell(dashboard, 2, 15, "", bgcolor = eps_row_color)
+    table.cell(dashboard, 3, 15, "", bgcolor = eps_row_color)
+    table.cell(dashboard, 4, 15, "", bgcolor = eps_row_color)
+    table.cell(dashboard, 5, 15, "", bgcolor = eps_row_color)
+    table.cell(dashboard, 6, 15, "", bgcolor = eps_row_color)
+    table.cell(dashboard, 7, 15, "", bgcolor = eps_row_color)
+    table.cell(dashboard, 8, 15, "", bgcolor = eps_row_color)
+    table.cell(dashboard, 9, 15, "", bgcolor = eps_row_color)
+    table.merge_cells(dashboard, 0, 15, 9, 15)
 
 
 // ============================================================================
-// SECTION 9: CHART ANNOTATIONS
+// SECTION 10: CHART ANNOTATIONS
 // ============================================================================
 
 // --- Labels on earnings bars ---
@@ -732,65 +880,93 @@ if i_show_labels and is_earnings_bar
     label.style lbl_style = label.style_label_down
 
     if is_gap_up
-        lbl_text := "GAP UP " + str.tostring(gap_pct, "#.1") + "%"
+        lbl_text := (i_compact_labels ? "GU " : "GAP UP ") + str.tostring(gap_pct, "#.1") + "%"
         lbl_color := color.new(color.green, 30)
         lbl_style := label.style_label_down
     else if is_gap_down
-        lbl_text := "GAP DN " + str.tostring(gap_pct, "#.1") + "%"
+        lbl_text := (i_compact_labels ? "GD " : "GAP DN ") + str.tostring(gap_pct, "#.1") + "%"
         lbl_color := color.new(color.red, 30)
         lbl_style := label.style_label_up
 
+    if is_large_gap
+        lbl_text += " ⚡"
+
     if green_turret_today
-        lbl_text += "\nGREEN TURRET"
+        lbl_text += "\n" + (i_compact_labels ? "GT" : "GREEN TURRET")
+
+    if post_open_continuation
+        lbl_text += "\n" + (i_compact_labels ? "CONT" : "CONTINUATION")
+    else if post_open_reversal
+        lbl_text += "\n" + (i_compact_labels ? "REV" : "REVERSAL")
+
+    if i_show_eps and not na(eps_surprise_pct)
+        lbl_text += "\nEPS: " + (eps_is_beat ? "+" : "") + str.tostring(eps_surprise_pct, "#.1") + "%"
 
     if active_setup_type >= 0
         lbl_text += "\nConf: " + str.tostring(active_confidence, "#.0")
+        if i_position_mode != "Fixed"
+            lbl_text += " | Risk: " + str.tostring(suggested_risk_pct, "#.1") + "%"
 
     if str.length(lbl_text) > 0
         label.new(bar_index, is_gap_up ? high : low, lbl_text, color = lbl_color, textcolor = color.white, style = lbl_style, size = size.small)
 
 
 // --- Background coloring based on confidence ---
-bgcolor(i_show_bg and is_earnings_bar and active_confidence >= CONF_HIGH ? color.new(color.green, 90) : i_show_bg and is_earnings_bar and active_confidence >= CONF_MEDIUM ? color.new(color.orange, 92) : i_show_bg and is_earnings_bar and not na(active_confidence) ? color.new(color.red, 92) : na)
+color bg_col = na
+if i_show_bg and is_earnings_bar
+    if active_confidence >= CONF_HIGH
+        bg_col := color.new(color.green, 90)
+    else if active_confidence >= CONF_MEDIUM
+        bg_col := color.new(color.orange, 92)
+    else if not na(active_confidence)
+        bg_col := color.new(color.red, 92)
+bgcolor(bg_col)
+
+// --- Gap fill marker ---
+plotshape(gap_filled_current, "Gap Filled", shape.xcross, location.belowbar, color.new(color.purple, 30), size = size.tiny)
 
 
 // ============================================================================
-// SECTION 10: SCORE PLOTS
+// SECTION 11: SCORE PLOTS
 // ============================================================================
 
-// Plot confidence score in a separate pane (only on earnings bars)
 plot(i_show_score_plot and is_earnings_bar ? active_confidence : na, "Confidence Score", color = conf_color(active_confidence), linewidth = 2, style = plot.style_columns, display = display.pane)
 
-// Reference lines for confidence levels
 hline(CONF_HIGH, "High Confidence", color = color.new(color.green, 70), linestyle = hline.style_dashed, display = display.pane)
 hline(CONF_MEDIUM, "Medium Confidence", color = color.new(color.orange, 70), linestyle = hline.style_dashed, display = display.pane)
 hline(CONF_LOW, "Low Confidence", color = color.new(color.red, 70), linestyle = hline.style_dashed, display = display.pane)
 
+// EPS surprise plot
+plot(i_show_score_plot and is_earnings_bar and not na(eps_surprise_pct) ? eps_surprise_pct : na, "EPS Surprise %", color = eps_is_beat ? color.lime : color.red, linewidth = 1, style = plot.style_columns, display = display.pane)
+
+// Relative volume plot
+plot(i_show_debug ? relative_volume : na, "Relative Volume", color = color.new(color.blue, 50), display = display.data_window)
+
 
 // ============================================================================
-// SECTION 11: ALERT CONDITIONS
+// SECTION 12: ALERT CONDITIONS
 // ============================================================================
 
-// High confidence alert
 alertcondition(is_earnings_bar and active_confidence >= CONF_HIGH, title = "High Confidence Setup", message = "HIGH CONFIDENCE earnings setup detected!\nSetup: {{plot_0}}\nTicker: {{ticker}}\nConfidence: " + str.tostring(active_confidence, "#.0"))
 
-// Earnings detected alert
 alertcondition(is_earnings_bar, title = "Earnings Detected", message = "Earnings report detected for {{ticker}}\nGap: " + str.tostring(gap_pct, "#.1") + "%\nDirection: " + (is_gap_up ? "GAP UP" : is_gap_down ? "GAP DOWN" : "FLAT"))
 
 // Probability shift detection
 var float prev_best_prob = na
 float current_best_prob = na(prob_gul) ? 0 : math.max(nz(prob_gul), math.max(nz(prob_gus), math.max(nz(prob_gdl), math.max(nz(prob_gds), math.max(nz(prob_gt), math.max(nz(prob_pm), math.max(nz(prob_sm), nz(prob_db))))))))
 bool prob_shift = not na(prev_best_prob) and math.abs(current_best_prob - prev_best_prob) > 10
-prev_best_prob := current_best_prob
 
 alertcondition(prob_shift, title = "Probability Shift", message = "Significant probability shift detected for {{ticker}}!\nPrevious best: " + str.tostring(nz(prev_best_prob), "#.0") + "%\nCurrent best: " + str.tostring(current_best_prob, "#.0") + "%")
+prev_best_prob := current_best_prob
+
+// EPS beat alert
+alertcondition(is_earnings_bar and eps_is_beat, title = "EPS Beat", message = "{{ticker}} BEAT earnings estimate!\nActual: " + str.tostring(nz(earnings_actual), "#.2") + " vs Est: " + str.tostring(nz(earnings_estimate), "#.2") + "\nSurprise: " + str.tostring(nz(eps_surprise_pct), "#.1") + "%")
 
 
 // ============================================================================
-// SECTION 12: DEBUG / TELEMETRY OUTPUT
+// SECTION 13: DEBUG / TELEMETRY OUTPUT
 // ============================================================================
 
-// Debug information plotted to data window
 plot(i_show_debug ? gap_pct : na, "Debug: Gap%", display = display.data_window)
 plot(i_show_debug ? market_cap_billions : na, "Debug: MCap(B)", display = display.data_window)
 plot(i_show_debug ? premarket_volume : na, "Debug: PM Vol", display = display.data_window)
@@ -799,5 +975,12 @@ plot(i_show_debug ? float(array.size(arr_setup_type)) : na, "Debug: Total Setups
 plot(i_show_debug ? active_confidence : na, "Debug: Active Conf", display = display.data_window)
 plot(i_show_debug ? float(is_earnings_bar ? 1 : 0) : na, "Debug: Is Earnings", display = display.data_window)
 plot(i_show_debug ? float(is_gap_up ? 1 : is_gap_down ? -1 : 0) : na, "Debug: Gap Dir", display = display.data_window)
+plot(i_show_debug ? nz(eps_surprise_pct) : na, "Debug: EPS Surprise%", display = display.data_window)
+plot(i_show_debug ? nz(gap_fill_rate) : na, "Debug: Gap Fill Rate%", display = display.data_window)
+plot(i_show_debug ? hist_volatility : na, "Debug: Hist Vol%", display = display.data_window)
+plot(i_show_debug ? relative_volume : na, "Debug: Rel Volume", display = display.data_window)
+plot(i_show_debug ? float(eps_beat_streak) : na, "Debug: EPS Beat Streak", display = display.data_window)
+plot(i_show_debug ? kelly_fraction : na, "Debug: Kelly%", display = display.data_window)
+plot(i_show_debug ? suggested_risk_pct : na, "Debug: Suggested Risk%", display = display.data_window)
 
 // End of indicator
