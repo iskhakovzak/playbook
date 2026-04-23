@@ -211,17 +211,19 @@ var float gap_fill_target = na
 var bool gap_fill_pending = false
 var int gap_fills_count = 0
 var int gap_total_count = 0
+var int gap_fill_direction = 0
 bool gap_filled_current = false
 
 if is_earnings_bar and (is_gap_up or is_gap_down)
     gap_fill_bar_start := bar_index
     gap_fill_target := nz(d_prev_close)
+    gap_fill_direction := gap_direction
     gap_fill_pending := true
     gap_total_count += 1
 
 if gap_fill_pending and bar_index > gap_fill_bar_start and bar_index <= gap_fill_bar_start + i_gap_fill_bars
     if not na(gap_fill_target)
-        if (is_gap_up and low <= gap_fill_target) or (is_gap_down and high >= gap_fill_target)
+        if (gap_fill_direction > 0 and low <= gap_fill_target) or (gap_fill_direction < 0 and high >= gap_fill_target)
             gap_fills_count += 1
             gap_fill_pending := false
             gap_filled_current := true
@@ -313,6 +315,17 @@ var int last_earnings_bar = 0
 var int last_gap_dir = 0
 var bool pending_outcome = false
 var float pending_eps_surprise = na
+var float pending_gap_pct = na
+var bool pending_is_large_gap = false
+var bool pending_green_turret = false
+var bool pending_daily_breakout = false
+var bool pending_has_pm_vol = false
+var float pending_pm_vol = 0.0
+var float pending_mcap = 0.0
+var int pending_price_pos = 0
+var string pending_sector = ""
+var bool pending_second_move_long = false
+var bool pending_second_move_short = false
 
 // Helper to record a single setup entry
 record_setup(int setup_type, int outcome, float g_pct, float mcap, float vol, int pp, bool brk, string sec, float eps_surp, bool large_gap) =>
@@ -333,6 +346,17 @@ if is_earnings_bar and timeframe.isdaily
     last_gap_dir := gap_direction
     last_earnings_bar := bar_index
     pending_eps_surprise := eps_surprise_pct
+    pending_gap_pct := gap_pct
+    pending_is_large_gap := is_large_gap
+    pending_green_turret := green_turret_today
+    pending_daily_breakout := is_daily_breakout
+    pending_has_pm_vol := has_premarket_volume
+    pending_pm_vol := premarket_volume
+    pending_mcap := market_cap_billions
+    pending_price_pos := price_position
+    pending_sector := current_sector
+    pending_second_move_long := is_second_move_long
+    pending_second_move_short := is_second_move_short
 
 if pending_outcome and timeframe.isdaily and bar_index > last_earnings_bar
 
@@ -340,24 +364,24 @@ if pending_outcome and timeframe.isdaily and bar_index > last_earnings_bar
     bool continuation = eod_result > 0 and last_gap_dir > 0 or eod_result < 0 and last_gap_dir < 0
 
     if last_gap_dir > 0
-        record_setup(SETUP_GAP_UP_LONG, continuation ? 1 : 0, gap_pct, market_cap_billions, premarket_volume, price_position, is_daily_breakout, current_sector, pending_eps_surprise, is_large_gap)
-        record_setup(SETUP_GAP_UP_SHORT, continuation ? 0 : 1, gap_pct, market_cap_billions, premarket_volume, price_position, is_daily_breakout, current_sector, pending_eps_surprise, is_large_gap)
+        record_setup(SETUP_GAP_UP_LONG, continuation ? 1 : 0, pending_gap_pct, pending_mcap, pending_pm_vol, pending_price_pos, pending_daily_breakout, pending_sector, pending_eps_surprise, pending_is_large_gap)
+        record_setup(SETUP_GAP_UP_SHORT, continuation ? 0 : 1, pending_gap_pct, pending_mcap, pending_pm_vol, pending_price_pos, pending_daily_breakout, pending_sector, pending_eps_surprise, pending_is_large_gap)
 
     if last_gap_dir < 0
-        record_setup(SETUP_GAP_DOWN_SHORT, continuation ? 1 : 0, gap_pct, market_cap_billions, premarket_volume, price_position, is_daily_breakout, current_sector, pending_eps_surprise, is_large_gap)
-        record_setup(SETUP_GAP_DOWN_LONG, continuation ? 0 : 1, gap_pct, market_cap_billions, premarket_volume, price_position, is_daily_breakout, current_sector, pending_eps_surprise, is_large_gap)
+        record_setup(SETUP_GAP_DOWN_SHORT, continuation ? 1 : 0, pending_gap_pct, pending_mcap, pending_pm_vol, pending_price_pos, pending_daily_breakout, pending_sector, pending_eps_surprise, pending_is_large_gap)
+        record_setup(SETUP_GAP_DOWN_LONG, continuation ? 0 : 1, pending_gap_pct, pending_mcap, pending_pm_vol, pending_price_pos, pending_daily_breakout, pending_sector, pending_eps_surprise, pending_is_large_gap)
 
-    if green_turret_today
-        record_setup(SETUP_GREEN_TURRET, eod_result < 0 ? 1 : 0, gap_pct, market_cap_billions, premarket_volume, price_position, is_daily_breakout, current_sector, pending_eps_surprise, is_large_gap)
+    if pending_green_turret
+        record_setup(SETUP_GREEN_TURRET, eod_result < 0 ? 1 : 0, pending_gap_pct, pending_mcap, pending_pm_vol, pending_price_pos, pending_daily_breakout, pending_sector, pending_eps_surprise, pending_is_large_gap)
 
-    if is_daily_breakout
-        record_setup(SETUP_DAILY_BREAKOUT, continuation ? 1 : 0, gap_pct, market_cap_billions, premarket_volume, price_position, is_daily_breakout, current_sector, pending_eps_surprise, is_large_gap)
+    if pending_daily_breakout
+        record_setup(SETUP_DAILY_BREAKOUT, continuation ? 1 : 0, pending_gap_pct, pending_mcap, pending_pm_vol, pending_price_pos, pending_daily_breakout, pending_sector, pending_eps_surprise, pending_is_large_gap)
 
-    if has_premarket_volume
-        record_setup(SETUP_PREMARKET, continuation ? 1 : 0, gap_pct, market_cap_billions, premarket_volume, price_position, is_daily_breakout, current_sector, pending_eps_surprise, is_large_gap)
+    if pending_has_pm_vol
+        record_setup(SETUP_PREMARKET, continuation ? 1 : 0, pending_gap_pct, pending_mcap, pending_pm_vol, pending_price_pos, pending_daily_breakout, pending_sector, pending_eps_surprise, pending_is_large_gap)
 
-    if is_second_move_long or is_second_move_short
-        record_setup(SETUP_SECOND_MOVE, is_second_move_long and continuation or is_second_move_short and not continuation ? 1 : 0, gap_pct, market_cap_billions, premarket_volume, price_position, is_daily_breakout, current_sector, pending_eps_surprise, is_large_gap)
+    if pending_second_move_long or pending_second_move_short
+        record_setup(SETUP_SECOND_MOVE, pending_second_move_long and continuation or pending_second_move_short and not continuation ? 1 : 0, pending_gap_pct, pending_mcap, pending_pm_vol, pending_price_pos, pending_daily_breakout, pending_sector, pending_eps_surprise, pending_is_large_gap)
 
     pending_outcome := false
 
@@ -572,6 +596,8 @@ if n_outcomes > 0 and barstate.islast
     max_consec_losses := 0
     sum_win_pnl := 0.0
     sum_loss_pnl := 0.0
+    peak_pnl := 0.0
+    max_drawdown := 0.0
     int cur_wins = 0
     int cur_losses = 0
 
@@ -929,9 +955,9 @@ alertcondition(is_earnings_bar, title = "Earnings Detected", message = "Earnings
 var float prev_best_prob = na
 float current_best_prob = na(prob_gul) ? 0 : math.max(nz(prob_gul), math.max(nz(prob_gus), math.max(nz(prob_gdl), math.max(nz(prob_gds), math.max(nz(prob_gt), math.max(nz(prob_pm), math.max(nz(prob_sm), nz(prob_db))))))))
 bool prob_shift = not na(prev_best_prob) and math.abs(current_best_prob - prev_best_prob) > 10
-prev_best_prob := current_best_prob
 
 alertcondition(prob_shift, title = "Probability Shift", message = "Significant probability shift detected for {{ticker}}!\nPrevious best: " + str.tostring(nz(prev_best_prob), "#.0") + "%\nCurrent best: " + str.tostring(current_best_prob, "#.0") + "%")
+prev_best_prob := current_best_prob
 
 // EPS beat alert
 alertcondition(is_earnings_bar and eps_is_beat, title = "EPS Beat", message = "{{ticker}} BEAT earnings estimate!\nActual: " + str.tostring(nz(earnings_actual), "#.2") + " vs Est: " + str.tostring(nz(earnings_estimate), "#.2") + "\nSurprise: " + str.tostring(nz(eps_surprise_pct), "#.1") + "%")
